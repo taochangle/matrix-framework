@@ -1,5 +1,5 @@
 {
-    "name": "matrix/framework",
+    "name": "taochangle/matrix-framework",
     "type": "library",
     "description": "Matrix - A modern PHP micro-framework",
     "license": "MIT",
