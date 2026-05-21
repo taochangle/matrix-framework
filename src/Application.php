@@ -152,12 +152,12 @@ class Application
                 $r->addRoute($route['method'], $route['uri'], $handler);
             }
         });
-        $time?->stopMeasure('route_build');
+        if ($time?->hasStartedMeasure('route_build')) $time?->stopMeasure('route_build');
 
         // Timeline: 路由分发
         $time?->startMeasure('route_dispatch', 'Dispatch');
         $routeInfo = $dispatcher->dispatch($request->getMethod(), $request->getPathInfo());
-        $time?->stopMeasure('route_dispatch');
+        if ($time?->hasStartedMeasure('route_dispatch')) $time?->stopMeasure('route_dispatch');
 
         switch ($routeInfo[0]) {
             case Dispatcher::NOT_FOUND:
@@ -185,7 +185,7 @@ class Application
                 $core = function () use ($handler, $time) {
                     $time?->startMeasure('handler', 'Controller');
                     $result = $handler();
-                    $time?->stopMeasure('handler');
+                    if ($time?->hasStartedMeasure('handler')) $time?->stopMeasure('handler');
                     return $result;
                 };
 
@@ -203,7 +203,7 @@ class Application
             };
         }
         $result = $pipeline();
-        $time?->stopMeasure('middleware');
+        if ($time?->hasStartedMeasure('middleware')) $time?->stopMeasure('middleware');
 
         if ($result instanceof Response) {
             return $result;
