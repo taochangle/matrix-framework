@@ -4,15 +4,17 @@ declare(strict_types=1);
 
 namespace Matrix;
 
-use Clockwork\Clockwork;
-use Clockwork\Storage\FileStorage;
 use Closure;
+use DebugBar\DataCollector\PDO\PDOCollector;
+use DebugBar\DataCollector\PDO\TraceablePDO;
+use DebugBar\StandardDebugBar;
 use DI\Container;
 use DI\ContainerBuilder;
 use FastRoute\Dispatcher;
 use Illuminate\Database\Capsule\Manager as Capsule;
-use Matrix\Middleware\ClockworkMiddleware;
+use Matrix\Middleware\DebugBarMiddleware;
 use Matrix\Routing\RouteCollector;
+use PDO;
 use Spatie\Ignition\Ignition;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -27,13 +29,14 @@ class Application
     /** @var array<callable> */
     protected array $globalMiddleware = [];
 
-    protected ?Clockwork $clockwork = null;
+    protected ?StandardDebugBar $debugBar = null;
+
+    protected ?Capsule $capsule = null;
 
     /**
      * @param array<string, mixed> $options {
-     *     database?: array,      // Eloquent 数据库配置
-     *     storage_path?: string, // Clockwork 存储路径，默认 storage/clockwork
-     *     debug?: bool,          // 是否启用 Ignition 错误页
+     *     database?: array,   // Eloquent 数据库配置
+     *     debug?: bool,       // 是否启用 Ignition 错误页
      * }
      */
     public function __construct(array $options = [])
@@ -53,17 +56,17 @@ class Application
             $this->bootEloquent($options['database']);
         }
 
-        // 初始化 Clockwork 性能追踪
-        $storagePath = $options['storage_path'] ?? __DIR__ . '/../../../storage/clockwork';
-        if (!is_dir($storagePath)) {
-            mkdir($storagePath, 0755, true);
-        }
-        $this->clockwork = new Clockwork();
-        $this->clockwork->setStorage(new FileStorage($storagePath));
-        $this->container->set(Clockwork::class, $this->clockwork);
+        // 初始化 DebugBar
+        $this->debugBar = new StandardDebugBar();
+        $this->container->set(StandardDebugBar::class, $this->debugBar);
 
-        // 注册全局 Clockwork 中间件
-        $this->addGlobalMiddleware([new ClockworkMiddleware($this->clockwork)]);
+        // 如果 Eloquent 已启动，挂载 PDO 追踪
+        if ($this->capsule !== null) {
+            $this->bootDebugBarPdo();
+        }
+
+        // 注册全局 DebugBar 中间件
+        $this->addGlobalMiddleware([new DebugBarMiddleware($this->debugBar)]);
     }
 
     public function getContainer(): Container
@@ -71,9 +74,9 @@ class Application
         return $this->container;
     }
 
-    public function getClockwork(): ?Clockwork
+    public function getDebugBar(): ?StandardDebugBar
     {
-        return $this->clockwork;
+        return $this->debugBar;
     }
 
     /**
@@ -128,7 +131,12 @@ class Application
 
                 $this->container->set(Request::class, $request);
 
-                $core = $handler; // 已被 wrapMiddleware 包裹
+                // 将 DebugBar 的 PDO Collector 重新绑定到当前请求的 PDO（连接池复用时需要）
+                if ($this->debugBar !== null && $this->capsule !== null) {
+                    $this->bootDebugBarPdo();
+                }
+
+                $core = $handler;
                 break;
         }
 
@@ -178,9 +186,38 @@ class Application
      */
     protected function bootEloquent(array $config): void
     {
-        $capsule = new Capsule();
-        $capsule->addConnection($config);
-        $capsule->setAsGlobal();
-        $capsule->bootEloquent();
+        $this->capsule = new Capsule();
+        $this->capsule->addConnection($config);
+        $this->capsule->setAsGlobal();
+        $this->capsule->bootEloquent();
+    }
+
+    /**
+     * 将 DebugBar PDO Collector 挂载到 Eloquent 的底层 PDO 连接上，
+     * 以便捕获所有 SQL 查询。
+     */
+    protected function bootDebugBarPdo(): void
+    {
+        $connection = $this->capsule->getConnection();
+        $pdo = $connection->getPdo();
+
+        // 如果已经是 TraceablePDO 则跳过
+        if ($pdo instanceof TraceablePDO) {
+            return;
+        }
+
+        $traceablePdo = new TraceablePDO($pdo);
+        $connection->setPdo($traceablePdo);
+
+        // 重置或添加 PDO Collector
+        $collector = $this->debugBar->getCollector('pdo');
+        if ($collector instanceof PDOCollector) {
+            // 已存在：替换内部 PDO
+            $ref = new \ReflectionProperty(PDOCollector::class, 'pdo');
+            $ref->setAccessible(true);
+            $ref->setValue($collector, $traceablePdo);
+        } else {
+            $this->debugBar->addCollector(new PDOCollector($traceablePdo));
+        }
     }
 }

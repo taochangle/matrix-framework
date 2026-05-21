@@ -13,7 +13,7 @@
         "firebase/php-jwt": "^6.0",
         "symfony/var-dumper": "^6.0|^7.0",
         "spatie/ignition": "^1.0",
-        "itsgoingd/clockwork": "^5.1"
+        "maximebf/debugbar": "^1.18"
     },
     "autoload": {
         "psr-4": {
