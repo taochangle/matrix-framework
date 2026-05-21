@@ -40,14 +40,22 @@ class Application
 
     protected ?Capsule $capsule = null;
 
+    protected string $basePath;
+
+    protected bool $debugBarRouteRegistered = false;
+
     /**
      * @param array<string, mixed> $options {
-     *     database?: array,   // Eloquent 数据库配置
-     *     debug?: bool,       // 是否启用 Ignition 错误页
+     *     base_path?: string,  // 应用根路径
+     *     database?: array,    // Eloquent 数据库配置
+     *     debug?: bool,        // 是否启用 Ignition 错误页
+     *     log_path?: string,   // 日志文件路径
+     *     views_path?: string, // Twig 模板目录
      * }
      */
     public function __construct(array $options = [])
     {
+        $this->basePath = rtrim($options['base_path'] ?? dirname(__DIR__, 2), '/');
         $debug = $options['debug'] ?? ($_ENV['APP_DEBUG'] ?? 'true') === 'true';
 
         // Spatie Ignition（版本信息通过 Flare 上报 + 环境变量展示）
@@ -81,13 +89,13 @@ class Application
             $this->container->set(StandardDebugBar::class, $this->debugBar);
 
             // Logger：写入 storage/logs/matrix.log + DebugBar 消息面板
-            $this->logger = new Logger($options['log_path'] ?? dirname(__DIR__, 2) . '/storage/logs/matrix.log');
+            $this->logger = new Logger($options['log_path'] ?? $this->basePath . '/storage/logs/matrix.log');
             $this->logger->setDebugBar($this->debugBar);
             $this->logger->info(self::NAME . ' v' . self::VERSION . ' started');
             $this->container->set(Logger::class, $this->logger);
 
             // Twig 模板引擎
-            $viewsPath = $options['views_path'] ?? dirname(__DIR__, 2) . '/views';
+            $viewsPath = $options['views_path'] ?? $this->basePath . '/views';
             if (is_dir($viewsPath)) {
                 $twig = new Twig($viewsPath);
                 $this->container->set(Twig::class, $twig);
@@ -143,6 +151,12 @@ class Application
     {
         $db = $this->debugBar;
         $time = $db?->offsetGet('time');
+
+        // 注册 DebugBar 资源路由（仅一次）
+        if ($db !== null && !$this->debugBarRouteRegistered) {
+            $this->routes[] = $this->buildDebugBarAssetRoute();
+            $this->debugBarRouteRegistered = true;
+        }
 
         // Timeline: 构建路由表
         $time?->startMeasure('route_build', 'Build Routes');
@@ -233,6 +247,41 @@ class Application
         }
 
         return $core;
+    }
+
+    /**
+     * DebugBar 静态资源路由（框架内置，无需在 routes/web.php 中手动注册）。
+     */
+    protected function buildDebugBarAssetRoute(): array
+    {
+        $app = $this;
+
+        $basePath = $this->basePath;
+
+        return [
+            'method'     => 'GET',
+            'uri'        => '/_debugbar/assets/{path:.+}',
+            'handler'    => function (Request $request) use ($basePath) {
+                $path = $request->attributes->get('path');
+                $file = $basePath . '/vendor/php-debugbar/php-debugbar/resources/' . $path;
+
+                // v2 兼容
+                if (!is_file($file)) {
+                    $file = $basePath . '/vendor/maximebf/debugbar/src/DebugBar/Resources/' . $path;
+                }
+
+                if (!is_file($file)) {
+                    return new Response('', 404);
+                }
+
+                $ext = pathinfo($file, PATHINFO_EXTENSION);
+                $types = ['css' => 'text/css', 'js' => 'application/javascript'];
+                return new Response(file_get_contents($file), 200, [
+                    'Content-Type' => $types[$ext] ?? 'application/octet-stream',
+                ]);
+            },
+            'middleware' => [],
+        ];
     }
 
     /**
