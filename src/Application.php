@@ -78,7 +78,6 @@ class Application
         // DebugBar：仅 debug 模式启用
         if ($debug) {
             $this->debugBar = new StandardDebugBar();
-            $this->debugBar['messages']->info(self::NAME . ' v' . self::VERSION);
             $this->container->set(StandardDebugBar::class, $this->debugBar);
 
             // Logger：写入 storage/logs/matrix.log + DebugBar 消息面板
@@ -142,14 +141,23 @@ class Application
      */
     public function handle(Request $request): Response
     {
+        $db = $this->debugBar;
+        $time = $db?->offsetGet('time');
+
+        // Timeline: 构建路由表
+        $time?->startMeasure('route_build', 'Build Routes');
         $dispatcher = \FastRoute\simpleDispatcher(function (\FastRoute\RouteCollector $r) {
             foreach ($this->routes as $route) {
                 $handler = $this->wrapMiddleware($route['handler'], $route['middleware']);
                 $r->addRoute($route['method'], $route['uri'], $handler);
             }
         });
+        $time?->stopMeasure('route_build');
 
+        // Timeline: 路由分发
+        $time?->startMeasure('route_dispatch', 'Dispatch');
         $routeInfo = $dispatcher->dispatch($request->getMethod(), $request->getPathInfo());
+        $time?->stopMeasure('route_dispatch');
 
         switch ($routeInfo[0]) {
             case Dispatcher::NOT_FOUND:
@@ -169,17 +177,15 @@ class Application
 
                 $this->container->set(Request::class, $request);
 
-                // 将 DebugBar 的 PDO Collector 重新绑定到当前请求的 PDO（连接池复用时需要）
                 if ($this->debugBar !== null && $this->capsule !== null) {
                     $this->bootDebugBarPdo();
                 }
 
-                // Timeline 埋点：路由处理 + 控制器执行
-                $core = function () use ($handler) {
-                    $debugBar = $this->debugBar;
-                    $debugBar?->offsetGet('time')?->startMeasure('route_handler', 'Route Handler');
+                // Timeline: 控制器执行
+                $core = function () use ($handler, $time) {
+                    $time?->startMeasure('handler', 'Controller');
                     $result = $handler();
-                    $debugBar?->offsetGet('time')?->stopMeasure('route_handler');
+                    $time?->stopMeasure('handler');
                     return $result;
                 };
 
@@ -187,7 +193,8 @@ class Application
                 break;
         }
 
-        // 全局中间件洋葱
+        // Timeline: 全局中间件
+        $time?->startMeasure('middleware', 'Middleware');
         $pipeline = $core;
         foreach (array_reverse($this->globalMiddleware) as $mw) {
             $next = $pipeline;
@@ -195,8 +202,8 @@ class Application
                 return $mw($request, $next);
             };
         }
-
         $result = $pipeline();
+        $time?->stopMeasure('middleware');
 
         if ($result instanceof Response) {
             return $result;
