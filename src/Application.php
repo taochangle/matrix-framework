@@ -15,6 +15,7 @@ use Illuminate\Database\Capsule\Manager as Capsule;
 use Matrix\Logger\Logger;
 use Matrix\Middleware\DebugBarMiddleware;
 use Matrix\Routing\RouteCollector;
+use Matrix\View\Twig;
 use PDO;
 use Spatie\Ignition\Ignition;
 use Symfony\Component\HttpFoundation\Request;
@@ -85,6 +86,13 @@ class Application
             $this->logger->setDebugBar($this->debugBar);
             $this->logger->info(self::NAME . ' v' . self::VERSION . ' started');
             $this->container->set(Logger::class, $this->logger);
+
+            // Twig 模板引擎
+            $viewsPath = $options['views_path'] ?? dirname(__DIR__, 2) . '/views';
+            if (is_dir($viewsPath)) {
+                $twig = new Twig($viewsPath);
+                $this->container->set(Twig::class, $twig);
+            }
 
             if ($this->capsule !== null) {
                 $this->bootDebugBarPdo();
