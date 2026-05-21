@@ -5,139 +5,139 @@ declare(strict_types=1);
 namespace Matrix;
 
 use Closure;
-use Matrix\Http\Request;
-use Matrix\Http\Response;
-use ReflectionFunction;
-use ReflectionMethod;
+use DI\Container;
+use DI\ContainerBuilder;
+use FastRoute\Dispatcher;
+use Illuminate\Database\Capsule\Manager as Capsule;
+use Matrix\Routing\RouteCollector;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Whoops\Handler\PrettyPageHandler;
+use Whoops\Run;
 
-class Application extends Container
+class Application
 {
-    protected static ?self $instance = null;
-
-    protected Router $router;
+    protected Container $container;
 
     /** @var array<callable> */
-    protected array $globalMiddleware = [];
-
-    public function __construct()
-    {
-        self::$instance = $this;
-
-        $this->singleton(Router::class);
-
-        $this->router = $this->make(Router::class);
-    }
+    protected array $routes = [];
 
     /**
-     * 获取 Application 单例。
+     * @param array<string, mixed>|null $dbConfig Eloquent 数据库配置
      */
-    public static function getInstance(): self
+    public function __construct(?array $dbConfig = null)
     {
-        if (self::$instance === null) {
-            self::$instance = new self();
+        // 注册 Whoops 优雅错误页
+        $whoops = new Run();
+        $whoops->pushHandler(new PrettyPageHandler());
+        $whoops->register();
+
+        // 初始化 PHP-DI 容器
+        $builder = new ContainerBuilder();
+        $builder->useAutowiring(true);
+        $this->container = $builder->build();
+
+        // 启动 Eloquent ORM
+        if ($dbConfig !== null) {
+            $this->bootEloquent($dbConfig);
         }
-        return self::$instance;
     }
 
-    /**
-     * 获取路由收集器。
-     */
-    public function getRouter(): Router
+    public function getContainer(): Container
     {
-        return $this->router;
+        return $this->container;
     }
 
     /**
-     * 注册全局中间件。
+     * 加载路由文件，文件中 $router 变量可用。
+     */
+    public function loadRoutes(string $file): self
+    {
+        $router = new RouteCollector();
+        require $file;
+        $this->routes = $router->getRoutes();
+        return $this;
+    }
+
+    /**
+     * 处理 HTTP 请求并返回响应。
+     */
+    public function handle(Request $request): Response
+    {
+        $dispatcher = \FastRoute\simpleDispatcher(function (\FastRoute\RouteCollector $r) {
+            foreach ($this->routes as $route) {
+                // 将路由处理器包裹在中间件洋葱中
+                $handler = $this->wrapMiddleware($route['handler'], $route['middleware']);
+                $r->addRoute($route['method'], $route['uri'], $handler);
+            }
+        });
+
+        $routeInfo = $dispatcher->dispatch($request->getMethod(), $request->getPathInfo());
+
+        switch ($routeInfo[0]) {
+            case Dispatcher::NOT_FOUND:
+                return new Response('404 Not Found', 404);
+
+            case Dispatcher::METHOD_NOT_ALLOWED:
+                return new Response('405 Method Not Allowed', 405);
+
+            case Dispatcher::FOUND:
+                [, $handler, $vars] = $routeInfo;
+
+                foreach ($vars as $key => $value) {
+                    $request->attributes->set($key, $value);
+                }
+
+                $this->container->set(Request::class, $request);
+
+                // $handler 已被 wrapMiddleware 包裹为 Closure
+                $result = $handler();
+
+                if ($result instanceof Response) {
+                    return $result;
+                }
+                return new Response((string) $result);
+        }
+
+        return new Response('Internal Server Error', 500);
+    }
+
+    /**
+     * 将中间件按洋葱模型包裹核心处理器。
      *
      * @param array<callable> $middleware
      */
-    public function addGlobalMiddleware(array $middleware): void
+    protected function wrapMiddleware(string|array|Closure $handler, array $middleware): Closure
     {
-        $this->globalMiddleware = array_merge($this->globalMiddleware, $middleware);
-    }
+        $core = function () use ($handler) {
+            if (is_array($handler) && count($handler) === 2) {
+                [$class, $method] = $handler;
+                $controller = $this->container->get($class);
+                return $this->container->call([$controller, $method]);
+            }
+            return $this->container->call($handler);
+        };
 
-    /**
-     * 加载路由文件。
-     */
-    public function loadRoutes(string $file): void
-    {
-        $router = $this->router;
-        require $file;
-    }
-
-    /**
-     * 处理 HTTP 请求并发送响应。
-     */
-    public function handle(Request $request): void
-    {
-        try {
-            $pipeline = new Pipeline();
-
-            $response = $pipeline
-                ->send($request)
-                ->through($this->globalMiddleware)
-                ->then(function (Request $request): Response {
-                    return $this->router->dispatch($request, $this);
-                });
-        } catch (\Throwable $e) {
-            $response = Response::json([
-                'code'    => -1,
-                'message' => $e->getMessage(),
-            ], 500);
+        // 从最内层向外构建洋葱
+        foreach (array_reverse($middleware) as $mw) {
+            $core = function () use ($mw, $core) {
+                return $mw($this->container->get(Request::class), $core);
+            };
         }
 
-        $response->send();
+        return $core;
     }
 
     /**
-     * 调用闭包，自动解析参数。
-     */
-    public function callClosure(Closure $closure, Request $request): Response
-    {
-        $reflection = new ReflectionFunction($closure);
-        $args = $this->resolveCallableParameters($reflection->getParameters(), $request);
-        return $reflection->invokeArgs($args);
-    }
-
-    /**
-     * 调用对象方法，自动解析参数。
-     */
-    public function callMethod(object $instance, string $method, Request $request): Response
-    {
-        $reflection = new ReflectionMethod($instance, $method);
-        $args = $this->resolveCallableParameters($reflection->getParameters(), $request);
-        return $reflection->invokeArgs($instance, $args);
-    }
-
-    /**
-     * 解析调用参数：自动注入 Request 或从容器解析类型提示。
+     * 启动 Laravel Eloquent ORM Capsule。
      *
-     * @param \ReflectionParameter[] $parameters
-     * @return array<int, mixed>
+     * @param array<string, mixed> $config
      */
-    protected function resolveCallableParameters(array $parameters, Request $request): array
+    protected function bootEloquent(array $config): void
     {
-        return array_map(function (\ReflectionParameter $param) use ($request): mixed {
-            $type = $param->getType();
-
-            if ($type instanceof \ReflectionNamedType) {
-                $typeName = $type->getName();
-                if ($typeName === Request::class) {
-                    return $request;
-                }
-                if (!$type->isBuiltin()) {
-                    return $this->make($typeName);
-                }
-            }
-
-            if ($param->isDefaultValueAvailable()) {
-                return $param->getDefaultValue();
-            }
-
-            throw new \RuntimeException(
-                sprintf('无法解析参数 $%s', $param->getName())
-            );
-        }, $parameters);
+        $capsule = new Capsule();
+        $capsule->addConnection($config);
+        $capsule->setAsGlobal();
+        $capsule->bootEloquent();
     }
 }
