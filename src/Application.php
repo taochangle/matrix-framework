@@ -21,6 +21,8 @@ use Symfony\Component\HttpFoundation\Response;
 
 class Application
 {
+    public const VERSION = '1.0.0';
+
     protected Container $container;
 
     /** @var array<callable> */
@@ -41,9 +43,14 @@ class Application
      */
     public function __construct(array $options = [])
     {
-        // Spatie Ignition 错误页
-        if ($options['debug'] ?? ($_ENV['APP_DEBUG'] ?? 'true') === 'true') {
-            Ignition::make()->register();
+        $debug = $options['debug'] ?? ($_ENV['APP_DEBUG'] ?? 'true') === 'true';
+
+        // Spatie Ignition（版本信息通过 $_ENV 传递给上下文面板）
+        if ($debug) {
+            $_ENV['MATRIX_VERSION'] = self::VERSION;
+            Ignition::make()
+                ->applicationPath(dirname(__DIR__))
+                ->register();
         }
 
         // 初始化 PHP-DI 容器
@@ -56,17 +63,18 @@ class Application
             $this->bootEloquent($options['database']);
         }
 
-        // 初始化 DebugBar
-        $this->debugBar = new StandardDebugBar();
-        $this->container->set(StandardDebugBar::class, $this->debugBar);
+        // DebugBar：仅 debug 模式启用
+        if ($debug) {
+            $this->debugBar = new StandardDebugBar();
+            $this->debugBar['messages']->info('Matrix Framework v' . self::VERSION);
+            $this->container->set(StandardDebugBar::class, $this->debugBar);
 
-        // 如果 Eloquent 已启动，挂载 PDO 追踪
-        if ($this->capsule !== null) {
-            $this->bootDebugBarPdo();
+            if ($this->capsule !== null) {
+                $this->bootDebugBarPdo();
+            }
+
+            $this->addGlobalMiddleware([new DebugBarMiddleware($this->debugBar)]);
         }
-
-        // 注册全局 DebugBar 中间件
-        $this->addGlobalMiddleware([new DebugBarMiddleware($this->debugBar)]);
     }
 
     public function getContainer(): Container
@@ -209,13 +217,14 @@ class Application
         $traceablePdo = new TraceablePDO($pdo);
         $connection->setPdo($traceablePdo);
 
-        // 重置或添加 PDO Collector
-        $collector = $this->debugBar->getCollector('pdo');
-        if ($collector instanceof PDOCollector) {
-            // 已存在：替换内部 PDO
-            $ref = new \ReflectionProperty(PDOCollector::class, 'pdo');
-            $ref->setAccessible(true);
-            $ref->setValue($collector, $traceablePdo);
+        // 添加 PDO Collector（如已存在则替换内部 PDO）
+        if ($this->debugBar->hasCollector('pdo')) {
+            $collector = $this->debugBar->getCollector('pdo');
+            if ($collector instanceof PDOCollector) {
+                $ref = new \ReflectionProperty(PDOCollector::class, 'pdo');
+                $ref->setAccessible(true);
+                $ref->setValue($collector, $traceablePdo);
+            }
         } else {
             $this->debugBar->addCollector(new PDOCollector($traceablePdo));
         }

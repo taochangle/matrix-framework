@@ -23,13 +23,13 @@ class DebugBarMiddleware
         /** @var Response $response */
         $response = $next($request);
 
-        $contentType = $response->headers->get('Content-Type', '');
+        $content = $response->getContent();
 
-        // 判断是否为 HTML 响应
-        if (stripos($contentType, 'text/html') !== false) {
+        // 判断是否为 HTML 响应（内容以 < 或 <!DOCTYPE 开头）
+        if (str_starts_with(ltrim($content), '<')) {
             $response = $this->injectDebugBarHtml($response);
         } else {
-            // API / JSON 响应：通过 Header 传递 Trace 数据
+            // API / JSON 响应：通过 Header 传递 DebugBar ID
             $response = $this->injectDebugBarHeaders($response);
         }
 
@@ -42,6 +42,7 @@ class DebugBarMiddleware
     protected function injectDebugBarHtml(Response $response): Response
     {
         $renderer = $this->debugBar->getJavascriptRenderer();
+        $renderer->setBaseUrl('/_debugbar/assets');
         $debugBarHtml  = $renderer->renderHead();
         $debugBarHtml .= $renderer->render();
 
@@ -58,28 +59,11 @@ class DebugBarMiddleware
     }
 
     /**
-     * API / JSON 响应：通过 HTTP Header 发送 Trace 数据。
+     * API / JSON 响应：通过 HTTP Header 传递 DebugBar ID。
      */
     protected function injectDebugBarHeaders(Response $response): Response
     {
-        $renderer = $this->debugBar->getJavascriptRenderer();
-        $renderer->sendDataInHeaders(true);
-
-        // 触发 header 收集
-        ob_start();
-        $renderer->render();
-        ob_end_clean();
-
-        // sendDataInHeaders 会在标准输出上产生 header，需要手动获取
-        // DebugBar 的 sendDataInHeaders 通过 header() 函数发送
-        // 在非标准输出（如这里）需要自己处理
-        $openHandlerUrl = '/_debugbar/open';
-        $response->headers->set('phpdebugbar-id', $this->debugBar->getCurrentRequestId());
-        $response->headers->set('phpdebugbar-control', json_encode([
-            'id'   => $this->debugBar->getCurrentRequestId(),
-            'url'  => $openHandlerUrl,
-        ]));
-
+        $response->headers->set('X-DebugBar-Id', $this->debugBar->getCurrentRequestId());
         return $response;
     }
 }
