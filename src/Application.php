@@ -12,6 +12,7 @@ use DI\Container;
 use DI\ContainerBuilder;
 use FastRoute\Dispatcher;
 use Illuminate\Database\Capsule\Manager as Capsule;
+use Matrix\Logger\Logger;
 use Matrix\Middleware\DebugBarMiddleware;
 use Matrix\Routing\RouteCollector;
 use PDO;
@@ -21,6 +22,7 @@ use Symfony\Component\HttpFoundation\Response;
 
 class Application
 {
+    public const NAME    = 'Matrix Framework';
     public const VERSION = '1.0.0';
 
     protected Container $container;
@@ -32,6 +34,8 @@ class Application
     protected array $globalMiddleware = [];
 
     protected ?StandardDebugBar $debugBar = null;
+
+    protected ?Logger $logger = null;
 
     protected ?Capsule $capsule = null;
 
@@ -45,12 +49,19 @@ class Application
     {
         $debug = $options['debug'] ?? ($_ENV['APP_DEBUG'] ?? 'true') === 'true';
 
-        // Spatie Ignition（版本信息通过 $_ENV 传递给上下文面板）
+        // Spatie Ignition（版本信息通过 Flare 上报 + 环境变量展示）
         if ($debug) {
             $_ENV['MATRIX_VERSION'] = self::VERSION;
-            Ignition::make()
-                ->applicationPath(dirname(__DIR__))
-                ->register();
+
+            $ignition = Ignition::make()->applicationPath(dirname(__DIR__));
+
+            // 错误页顶部 Documentation 链接（含版本号）
+            $ignition->resolveDocumentationLink(
+                fn() => 'https://github.com/taochangle/matrix-framework (Matrix Framework v' . self::VERSION . ')'
+            );
+
+            $ignition->getFlare()->determineVersionUsing(fn() => 'Matrix Framework v' . self::VERSION);
+            $ignition->register();
         }
 
         // 初始化 PHP-DI 容器
@@ -66,8 +77,14 @@ class Application
         // DebugBar：仅 debug 模式启用
         if ($debug) {
             $this->debugBar = new StandardDebugBar();
-            $this->debugBar['messages']->info('Matrix Framework v' . self::VERSION);
+            $this->debugBar['messages']->info(self::NAME . ' v' . self::VERSION);
             $this->container->set(StandardDebugBar::class, $this->debugBar);
+
+            // Logger：写入 storage/logs/matrix.log + DebugBar 消息面板
+            $this->logger = new Logger($options['log_path'] ?? dirname(__DIR__, 2) . '/storage/logs/matrix.log');
+            $this->logger->setDebugBar($this->debugBar);
+            $this->logger->info(self::NAME . ' v' . self::VERSION . ' started');
+            $this->container->set(Logger::class, $this->logger);
 
             if ($this->capsule !== null) {
                 $this->bootDebugBarPdo();
@@ -85,6 +102,11 @@ class Application
     public function getDebugBar(): ?StandardDebugBar
     {
         return $this->debugBar;
+    }
+
+    public function getLogger(): ?Logger
+    {
+        return $this->logger;
     }
 
     /**
@@ -144,7 +166,16 @@ class Application
                     $this->bootDebugBarPdo();
                 }
 
-                $core = $handler;
+                // Timeline 埋点：路由处理 + 控制器执行
+                $core = function () use ($handler) {
+                    $debugBar = $this->debugBar;
+                    $debugBar?->offsetGet('time')?->startMeasure('route_handler', 'Route Handler');
+                    $result = $handler();
+                    $debugBar?->offsetGet('time')?->stopMeasure('route_handler');
+                    return $result;
+                };
+
+                $this->logger?->info($request->getMethod() . ' ' . $request->getPathInfo());
                 break;
         }
 
